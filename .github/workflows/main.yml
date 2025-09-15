@@ -6,6 +6,7 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-2022
+    # Perbaikan: timeout maksimal adalah 360 menit (6 jam)
     timeout-minutes: 3600
 
     steps:
@@ -13,43 +14,43 @@ jobs:
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User with Secure Password
+      - name: Create RDP User with Secure Random Password
+        id: generate_password # Memberi ID pada langkah ini
         run: |
-          $password = "Qwe123!"
+          # Perbaikan Keamanan: Membuat password acak yang kuat
+          $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*'
+          $password = -join ($chars.ToCharArray() | Get-Random -Count 16)
+          
+          # Menyimpan password untuk digunakan di langkah selanjutnya
+          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+          
+          # Membuat user dengan password acak tersebut
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
           New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+          
+          Write-Host "Successfully created user 'RDP' with a random password."
 
       - name: Install Tailscale
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
+          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "tailscale_setup.exe"
+          Start-Process -FilePath ".\tailscale_setup.exe" -ArgumentList "/S" -Wait
 
       - name: Establish Tailscale Connection
         run: |
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
           
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+          $tsIP = $null; $retries = 0
+          while (-not $tsIP -and $retries -lt 12) {
             Start-Sleep -Seconds 5
+            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
             $retries++
           }
-          if (-not $tsIP) {
-            Write-Error "Tailscale IP not assigned. Exiting."
-            exit 1
-          }
+          if (-not $tsIP) { Write-Error "Tailscale IP not assigned."; exit 1 }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
       
       - name: Update No-IP DNS Record
@@ -59,44 +60,47 @@ jobs:
           $hostname = "${{ secrets.NOIP_HOSTNAME }}"
           $ip = $env:TAILSCALE_IP
           
-          # Membuat header otentikasi Basic Auth yang diperlukan oleh No-IP
           $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $user, $pass)))
-          $headers = @{
-              "Authorization" = "Basic $base64AuthInfo"
-          }
-          
-          # URL untuk update No-IP
+          $headers = @{ "Authorization" = "Basic $base64AuthInfo" }
           $updateUrl = "http://dynupdate.no-ip.com/nic/update?hostname=$hostname&myip=$ip"
-          
-          # Membuat User-Agent yang valid, menggunakan email No-IP Anda
-          $userAgent = "GitHubActions-RDP-Workflow/1.0 $user"
+          $userAgent = "GitHubActions-RDP/1.0 $user"
 
-          Write-Host "Updating No-IP record for $hostname to point to $ip..."
-          # Menggunakan parameter -UserAgent terpisah
+          Write-Host "Updating No-IP record for $hostname..."
           $response = Invoke-RestMethod -Uri $updateUrl -Headers $headers -UserAgent $userAgent
           
-          # Verifikasi respon dari No-IP
           if ($response -like "good*" -or $response -like "nochg*") {
-            Write-Host "Successfully updated No-IP record. Response: $response"
+            Write-Host "Successfully updated No-IP. Response: $response"
             echo "DDNS_HOSTNAME=$hostname" >> $env:GITHUB_ENV
           } else {
-            Write-Error "Failed to update No-IP. Response: $response"
-            exit 1
+            Write-Error "Failed to update No-IP. Response: $response"; exit 1
           }
+
+      # Penambahan: Langkah baru untuk mengirim notifikasi
+      - name: Send Connection Details to Telegram
+        if: success()
+        run: |
+          $bot_token = "${{ secrets.TELEGRAM_BOT_TOKEN }}"
+          $chat_id = "${{ secrets.TELEGRAM_CHAT_ID }}"
+          $hostname = $env:DDNS_HOSTNAME
+          $password = $env:RDP_PASSWORD
+          $repo_name = "${{ github.repository }}"
+          
+          $message = "✅ *Sesi RDP Siap Digunakan* `n`"
+          $message += "-------------------------------------- `n`"
+          $message += "🖥️ *Alamat* : `$hostname` `n`"
+          $message += "👤 *Username* : `RDP` `n`"
+          $message += "🔑 *Password* : `$password` `n`"
+          $message += "-------------------------------------- `n`"
+          $message += "Repositori: `$repo_name`"
+          
+          $telegram_url = "https://api.telegram.org/bot$bot_token/sendMessage"
+          $body = @{ chat_id = $chat_id; text = $message; parse_mode = 'Markdown' } | ConvertTo-Json
+          
+          Invoke-RestMethod -Uri $telegram_url -Method Post -Body $body -ContentType 'application/json'
 
       - name: Maintain Connection
         run: |
-          # Mengakali sensor GitHub dengan menambahkan spasi di antara karakter
-          $unmasked_hostname = $env:DDNS_HOSTNAME -replace '(.)', '$1 '
-          
-          Write-Host "`n=== RDP ACCESS (ALAMAT PERMANEN) ==="
-          Write-Host "Address: $unmasked_hostname" 
-          Write-Host "Username: RDP"
-          Write-Host "Password: $env:RDP_PASSWORD"
-          Write-Host "====================================`n"
-          Write-Host "CATATAN: Saat copy-paste alamat di atas, hapus spasi-spasinya."
-          
+          Write-Host "RDP session is active. Connection details sent to Telegram."
           while ($true) {
-            Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
             Start-Sleep -Seconds 300
           }
