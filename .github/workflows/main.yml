@@ -6,8 +6,7 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-2022
-    # Perbaikan: timeout maksimal adalah 360 menit (6 jam)
-    timeout-minutes: 3600
+    timeout-minutes: 360
 
     steps:
       - name: Configure Core RDP Settings
@@ -17,23 +16,15 @@ jobs:
           netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User with Secure Random Password
-        id: generate_password # Memberi ID pada langkah ini
+      # Perbaikan: Mengembalikan password menjadi statis "Qwe123!"
+      - name: Create RDP User with Secure Password
         run: |
-          # Perbaikan Keamanan: Membuat password acak yang kuat
-          $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*'
-          $password = -join ($chars.ToCharArray() | Get-Random -Count 16)
-          
-          # Menyimpan password untuk digunakan di langkah selanjutnya
-          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
-          
-          # Membuat user dengan password acak tersebut
+          $password = "Qwe123!"
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
           New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          
-          Write-Host "Successfully created user 'RDP' with a random password."
+          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
 
       - name: Install Tailscale
         run: |
@@ -75,7 +66,7 @@ jobs:
             Write-Error "Failed to update No-IP. Response: $response"; exit 1
           }
 
-      # Penambahan: Langkah baru untuk mengirim notifikasi
+      # Perbaikan: Mengubah cara pembuatan pesan untuk mengatasi error PowerShell
       - name: Send Connection Details to Telegram
         if: success()
         run: |
@@ -85,13 +76,16 @@ jobs:
           $password = $env:RDP_PASSWORD
           $repo_name = "${{ github.repository }}"
           
-          $message = "✅ *Sesi RDP Siap Digunakan* `n`"
-          $message += "-------------------------------------- `n`"
-          $message += "🖥️ *Alamat* : `$hostname` `n`"
-          $message += "👤 *Username* : `RDP` `n`"
-          $message += "🔑 *Password* : `$password` `n`"
-          $message += "-------------------------------------- `n`"
-          $message += "Repositori: `$repo_name`"
+          # Menggunakan format "here-string" (@"..."@) yang lebih aman untuk pesan multi-baris
+          $message = @"
+          ✅ *Sesi RDP Siap Digunakan*
+          --------------------------------------
+          🖥️ *Alamat* : `$hostname`
+          👤 *Username* : `RDP`
+          🔑 *Password* : `$password`
+          --------------------------------------
+          Repositori: `$repo_name`
+          "@
           
           $telegram_url = "https://api.telegram.org/bot$bot_token/sendMessage"
           $body = @{ chat_id = $chat_id; text = $message; parse_mode = 'Markdown' } | ConvertTo-Json
