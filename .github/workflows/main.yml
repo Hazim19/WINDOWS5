@@ -13,10 +13,9 @@ jobs:
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
+          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport:3389
           Restart-Service -Name TermService -Force
 
-      # Perbaikan: Mengembalikan password menjadi statis "Qwe123!"
       - name: Create RDP User with Secure Password
         run: |
           $password = "Qwe123!"
@@ -66,7 +65,6 @@ jobs:
             Write-Error "Failed to update No-IP. Response: $response"; exit 1
           }
 
-      # Perbaikan: Mengubah cara pembuatan pesan untuk mengatasi error PowerShell
       - name: Send Connection Details to Telegram
         if: success()
         run: |
@@ -76,15 +74,15 @@ jobs:
           $password = $env:RDP_PASSWORD
           $repo_name = "${{ github.repository }}"
           
-          # Menggunakan format "here-string" (@"..."@) yang lebih aman untuk pesan multi-baris
+          # PERBAIKAN: Menghapus backtick ` dari sekeliling variabel
           $message = @"
           ✅ *Sesi RDP Siap Digunakan*
           --------------------------------------
-          🖥️ *Alamat* : `$hostname`
-          👤 *Username* : `RDP`
-          🔑 *Password* : `$password`
+          🖥️ *Alamat* : $hostname
+          👤 *Username* : RDP
+          🔑 *Password* : $password
           --------------------------------------
-          Repositori: `$repo_name`
+          Repositori: $repo_name
           "@
           
           $telegram_url = "https://api.telegram.org/bot$bot_token/sendMessage"
