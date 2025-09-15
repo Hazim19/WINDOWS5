@@ -1,100 +1,102 @@
-name: RDP
+name: RDP with No-IP
 
 on:
   workflow_dispatch:
 
 jobs:
   secure-rdp:
-    runs-on: windows-latest
+    runs-on: windows-2022
     timeout-minutes: 3600
 
     steps:
       - name: Configure Core RDP Settings
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication (if needed)
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
-
-          # Remove any existing rule with the same name to avoid duplication
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          
-          # For testing, allow any incoming connection on port 3389
-          netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389
-
-          # (Optional) Restart the Remote Desktop service to ensure changes take effect
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
       - name: Create RDP User with Secure Password
         run: |
-          $password = "Jimyb0t159!"
+          $password = "Qwe123!"
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
           New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          
-          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
-          
-          if (-not (Get-LocalUser -Name "RDP")) {
-              Write-Error "User creation failed"
-              exit 1
-          }
+          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
 
       - name: Install Tailscale
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
-          
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
 
       - name: Establish Tailscale Connection
         run: |
-          # Bring up Tailscale with the provided auth key and set a unique hostname
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
           
-          # Wait for Tailscale to assign an IP
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
-              $retries++
+            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+            Start-Sleep -Seconds 5
+            $retries++
           }
-          
           if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
-              exit 1
+            Write-Error "Tailscale IP not assigned. Exiting."
+            exit 1
           }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
       
-      - name: Verify RDP Accessibility
+      - name: Update No-IP DNS Record
         run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          $user = "${{ secrets.NOIP_USER }}"
+          $pass = "${{ secrets.NOIP_PASS }}"
+          $hostname = "${{ secrets.NOIP_HOSTNAME }}"
+          $ip = $env:TAILSCALE_IP
           
-          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
-              exit 1
+          # Membuat header otentikasi Basic Auth yang diperlukan oleh No-IP
+          $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $user, $pass)))
+          $headers = @{
+              "Authorization" = "Basic $base64AuthInfo"
           }
-          Write-Host "TCP connectivity successful!"
+          
+          # URL untuk update No-IP
+          $updateUrl = "http://dynupdate.no-ip.com/nic/update?hostname=$hostname&myip=$ip"
+          
+          # Membuat User-Agent yang valid, menggunakan email No-IP Anda
+          $userAgent = "GitHubActions-RDP-Workflow/1.0 $user"
+
+          Write-Host "Updating No-IP record for $hostname to point to $ip..."
+          # Menggunakan parameter -UserAgent terpisah
+          $response = Invoke-RestMethod -Uri $updateUrl -Headers $headers -UserAgent $userAgent
+          
+          # Verifikasi respon dari No-IP
+          if ($response -like "good*" -or $response -like "nochg*") {
+            Write-Host "Successfully updated No-IP record. Response: $response"
+            echo "DDNS_HOSTNAME=$hostname" >> $env:GITHUB_ENV
+          } else {
+            Write-Error "Failed to update No-IP. Response: $response"
+            exit 1
+          }
 
       - name: Maintain Connection
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: $(echo $env:RDP_CREDS)"
-          Write-Host "==================`n"
+          # Mengakali sensor GitHub dengan menambahkan spasi di antara karakter
+          $unmasked_hostname = $env:DDNS_HOSTNAME -replace '(.)', '$1 '
           
-          # Keep runner active indefinitely (or until manually cancelled)
+          Write-Host "`n=== RDP ACCESS (ALAMAT PERMANEN) ==="
+          Write-Host "Address: $unmasked_hostname" 
+          Write-Host "Username: RDP"
+          Write-Host "Password: $env:RDP_PASSWORD"
+          Write-Host "====================================`n"
+          Write-Host "CATATAN: Saat copy-paste alamat di atas, hapus spasi-spasinya."
+          
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
-              Start-Sleep -Seconds 300
+            Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+            Start-Sleep -Seconds 300
           }
